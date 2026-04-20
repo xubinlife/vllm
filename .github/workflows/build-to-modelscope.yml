@@ -1,0 +1,212 @@
+name: Build vLLM Image from Fork and Upload to ModelScope
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_ref:
+        description: "Git ref to build from, e.g. main or v0.10.1"
+        required: true
+        default: "main"
+      image_name:
+        description: "Docker image name"
+        required: true
+        default: "vllm-openai"
+      image_tag:
+        description: "Docker image tag"
+        required: true
+        default: "custom"
+      cuda_arch_list:
+        description: 'Optional torch_cuda_arch_list, e.g. "8.0 8.6 8.9 9.0+PTX"'
+        required: false
+        default: ""
+      max_jobs:
+        description: "build arg max_jobs"
+        required: false
+        default: "8"
+      nvcc_threads:
+        description: "build arg nvcc_threads"
+        required: false
+        default: "2"
+      use_precompiled:
+        description: "build arg VLLM_USE_PRECOMPILED, 1 or 0"
+        required: false
+        default: "1"
+
+permissions:
+  contents: read
+
+env:
+  EXPORT_DIR: dist
+
+jobs:
+  build-and-upload:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout fork repository
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref }}
+          fetch-depth: 1
+
+      - name: Free disk space
+        shell: bash
+        run: |
+          set -euxo pipefail
+          df -h
+          sudo rm -rf /usr/local/lib/android || true
+          sudo rm -rf /opt/ghc || true
+          sudo rm -rf /opt/hostedtoolcache/CodeQL || true
+          docker system prune -af || true
+          df -h
+
+      - name: Validate required docker files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          test -f docker/Dockerfile
+          test -d docker
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build vLLM image
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          IMAGE_REF="${{ inputs.image_name }}:${{ inputs.image_tag }}"
+
+          BUILD_ARGS=(
+            --build-arg "max_jobs=${{ inputs.max_jobs }}"
+            --build-arg "nvcc_threads=${{ inputs.nvcc_threads }}"
+            --build-arg "VLLM_USE_PRECOMPILED=${{ inputs.use_precompiled }}"
+          )
+
+          if [ -n "${{ inputs.cuda_arch_list }}" ]; then
+            BUILD_ARGS+=(--build-arg "torch_cuda_arch_list=${{ inputs.cuda_arch_list }}")
+          fi
+
+          docker buildx build \
+            --load \
+            --file docker/Dockerfile \
+            --target vllm-openai \
+            --tag "${IMAGE_REF}" \
+            "${BUILD_ARGS[@]}" \
+            .
+
+      - name: Export docker image as tar.gz
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "${EXPORT_DIR}"
+          IMAGE_REF="${{ inputs.image_name }}:${{ inputs.image_tag }}"
+          OUT_FILE="${EXPORT_DIR}/${{ inputs.image_name }}-${{ inputs.image_tag }}.tar.gz"
+
+          docker image inspect "${IMAGE_REF}" >/dev/null
+          docker save "${IMAGE_REF}" | gzip -1 > "${OUT_FILE}"
+          sha256sum "${OUT_FILE}" > "${OUT_FILE}.sha256"
+          ls -lh "${EXPORT_DIR}"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: docker-image-${{ inputs.image_tag }}
+          path: dist/*
+          if-no-files-found: error
+          compression-level: 0
+
+      - name: Install git-lfs
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Clone ModelScope repository
+        shell: bash
+        env:
+          MODELSCOPE_TOKEN: ${{ secrets.MODELSCOPE_TOKEN }}
+          MODELSCOPE_REPO: ${{ secrets.MODELSCOPE_REPO }}
+          MODELSCOPE_BRANCH: ${{ secrets.MODELSCOPE_BRANCH }}
+        run: |
+          set -euxo pipefail
+          BRANCH="${MODELSCOPE_BRANCH:-master}"
+          rm -rf modelscope-repo
+          git clone "https://oauth2:${MODELSCOPE_TOKEN}@www.modelscope.cn/${MODELSCOPE_REPO}.git" modelscope-repo || \
+          git clone "https://oauth2:${MODELSCOPE_TOKEN}@modelscope.cn/${MODELSCOPE_REPO}.git" modelscope-repo
+          cd modelscope-repo
+          git checkout "${BRANCH}" || true
+
+      - name: Copy exported image files
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "modelscope-repo/docker-images/${{ inputs.image_tag }}"
+          cp -f dist/* "modelscope-repo/docker-images/${{ inputs.image_tag }}/"
+
+      - name: Track tarball with Git LFS
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd modelscope-repo
+          git lfs track "docker-images/**/*.tar.gz"
+          git add .gitattributes
+          git add docker-images/
+
+      - name: Generate README
+        shell: bash
+        run: |
+          set -euxo pipefail
+          FILE_NAME="${{ inputs.image_name }}-${{ inputs.image_tag }}.tar.gz"
+          mkdir -p modelscope-repo
+          cat > modelscope-repo/README.md <<EOF
+          # vLLM Docker Image Package
+          
+          This repository stores exported offline Docker image packages.
+          
+          ## Build source
+          
+          - source ref: \`${{ inputs.source_ref }}\`
+          - image: \`${{ inputs.image_name }}:${{ inputs.image_tag }}\`
+          
+          ## Files
+          
+          - \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}\`
+          - \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}.sha256\`
+          
+          ## Load locally
+          
+          \`\`\`bash
+          gunzip -c docker-images/${{ inputs.image_tag }}/${FILE_NAME} | docker load
+          \`\`\`
+          
+          ## Example run
+          
+          \`\`\`bash
+          docker run --runtime nvidia --gpus all \\
+            --ipc=host \\
+            -p 8000:8000 \\
+            ${{ inputs.image_name }}:${{ inputs.image_tag }} \\
+            --model Qwen/Qwen3-0.6B
+          \`\`\`
+          EOF
+          git -C modelscope-repo add README.md
+
+      - name: Commit and push to ModelScope
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cd modelscope-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+
+          git commit -m "Add vLLM image package for ${{ inputs.source_ref }}"
+          git push origin HEAD
