@@ -161,39 +161,38 @@ jobs:
         run: |
           set -euxo pipefail
           FILE_NAME="${{ inputs.image_name }}-${{ inputs.image_tag }}.tar.gz"
-
+          mkdir -p modelscope-repo
           cat > modelscope-repo/README.md <<EOF
-# vLLM Docker Image Package
-
-This repository stores exported offline Docker image packages.
-
-## Build source
-
-- source ref: \`${{ inputs.source_ref }}\`
-- image: \`${{ inputs.image_name }}:${{ inputs.image_tag }}\`
-
-## Files
-
-- \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}\`
-- \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}.sha256\`
-
-## Load locally
-
-\`\`\`bash
-gunzip -c docker-images/${{ inputs.image_tag }}/${FILE_NAME} | docker load
-\`\`\`
-
-## Example run
-
-\`\`\`bash
-docker run --runtime nvidia --gpus all \\
-  --ipc=host \\
-  -p 8000:8000 \\
-  ${{ inputs.image_name }}:${{ inputs.image_tag }} \\
-  --model Qwen/Qwen3-0.6B
-\`\`\`
-EOF
-
+          # vLLM Docker Image Package
+          
+          This repository stores exported offline Docker image packages.
+          
+          ## Build source
+          
+          - source ref: \`${{ inputs.source_ref }}\`
+          - image: \`${{ inputs.image_name }}:${{ inputs.image_tag }}\`
+          
+          ## Files
+          
+          - \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}\`
+          - \`docker-images/${{ inputs.image_tag }}/${FILE_NAME}.sha256\`
+          
+          ## Load locally
+          
+          \`\`\`bash
+          gunzip -c docker-images/${{ inputs.image_tag }}/${FILE_NAME} | docker load
+          \`\`\`
+          
+          ## Example run
+          
+          \`\`\`bash
+          docker run --runtime nvidia --gpus all \\
+            --ipc=host \\
+            -p 8000:8000 \\
+            ${{ inputs.image_name }}:${{ inputs.image_tag }} \\
+            --model Qwen/Qwen3-0.6B
+          \`\`\`
+          EOF
           git -C modelscope-repo add README.md
 
       - name: Commit and push to ModelScope
